@@ -23,11 +23,11 @@ from mslk.quantize.triton.fp4_quantize import (
     quantize_nvfp4_naive,
     triton_quantize_mx4_unpack,
 )
-from mslk.quantize.triton.legacy.fp4_utils import (
-    dequantize_nvfp4,
-    fp4_to_float,
+from mslk.gemm.fp4_autograd import (
+    _dequantize_fp4_to_bf16,
+    _dequantize_mxfp4_to_bf16,
 )
-from mslk.quantize.triton.legacy.primitives import _from_blocked
+from mslk.quantize.triton.legacy.fp4_utils import dequantize_nvfp4
 from mslk.utils.device import (
     compute_capability_in,
     gfx_arch_in,
@@ -3194,41 +3194,8 @@ class RocmInt8GemmTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# FP4 backward (autograd) helpers & tests
+# FP4 backward (autograd) tests
 # ---------------------------------------------------------------------------
-
-
-def _ref_dequantize_mxfp4(
-    xq: torch.Tensor,
-    scale: torch.Tensor,
-    block_size: int = 32,
-) -> torch.Tensor:
-    """Reference MXFP4 dequantization for backward tests."""
-    xq_u8 = xq.view(torch.uint8)
-    M = xq_u8.shape[0]
-    K = xq_u8.shape[1] * 2
-    x_float = fp4_to_float(xq_u8)
-    num_groups = K // block_size
-    scale_flat = _from_blocked(
-        scale.reshape(-1).view(torch.uint8), (M, num_groups)
-    )
-    scale_float = torch.exp2(
-        scale_flat.view(torch.uint8).to(torch.float32) - 127.0
-    )
-    x_scaled = (
-        x_float.view(M, num_groups, block_size)
-        * scale_float.view(M, num_groups, 1)
-    ).view(M, K)
-    return x_scaled.to(torch.bfloat16)
-
-
-def _ref_dequantize_nvfp4(
-    xq: torch.Tensor,
-    scale: torch.Tensor,
-    global_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Reference NVFP4 dequantization for backward tests."""
-    return dequantize_nvfp4(xq.view(torch.uint8), scale, global_scale, group_size=16)
 
 
 @unittest.skipIf(not SUPPORTS_MXFP4, "Skip if MXFP4 is not supported")
@@ -3246,8 +3213,8 @@ class MXFP4BackwardTests(unittest.TestCase):
         xq, x_scale = triton_quantize_mx4_unpack(X, group_size=32)
         wq, w_scale = triton_quantize_mx4_unpack(W, group_size=32)
 
-        X_deq = _ref_dequantize_mxfp4(xq, x_scale, block_size=32)
-        W_deq = _ref_dequantize_mxfp4(wq, w_scale, block_size=32)
+        X_deq = _dequantize_mxfp4_to_bf16(xq, x_scale, block_size=32)
+        W_deq = _dequantize_mxfp4_to_bf16(wq, w_scale, block_size=32)
         X_deq.requires_grad_(True)
         W_deq.requires_grad_(True)
 
@@ -3292,9 +3259,9 @@ class MXFP4BackwardTests(unittest.TestCase):
         W = torch.randn(N, K, dtype=torch.bfloat16, device=self.device) * 0.01
         xq, x_scale = triton_quantize_mx4_unpack(X, group_size=32)
         wq, w_scale = triton_quantize_mx4_unpack(W, group_size=32)
-        X_deq = _ref_dequantize_mxfp4(xq, x_scale, block_size=32)
+        X_deq = _dequantize_mxfp4_to_bf16(xq, x_scale, block_size=32)
         X_deq.requires_grad_(True)
-        W_deq = _ref_dequantize_mxfp4(wq, w_scale, block_size=32)
+        W_deq = _dequantize_mxfp4_to_bf16(wq, w_scale, block_size=32)
         Y = X_deq @ W_deq.t()
         Y.sum().backward()
         self.assertGreater(X_deq.grad.abs().max().item(), 0.0)
@@ -3304,7 +3271,7 @@ class MXFP4BackwardTests(unittest.TestCase):
         M, K = 128, 1024
         X = torch.randn(M, K, dtype=torch.bfloat16, device=self.device) * 0.1
         xq, x_scale = triton_quantize_mx4_unpack(X, group_size=32)
-        X_deq = _ref_dequantize_mxfp4(xq, x_scale, block_size=32)
+        X_deq = _dequantize_mxfp4_to_bf16(xq, x_scale, block_size=32)
         self.assertEqual(X_deq.shape, (M, K))
         self.assertEqual(X_deq.dtype, torch.bfloat16)
         self.assertTrue(X_deq.isfinite().all())
@@ -3329,8 +3296,8 @@ class NVFP4BackwardTests(unittest.TestCase):
         xqs, x_scales = quantize_nvfp4_naive([X], x_gs)
         wqs, w_scales = quantize_nvfp4_naive([W], w_gs)
 
-        X_deq = _ref_dequantize_nvfp4(xqs[0], x_scales[0], global_scales[0])
-        W_deq = _ref_dequantize_nvfp4(wqs[0], w_scales[0], global_scales[0])
+        X_deq = dequantize_nvfp4(xqs[0].view(torch.uint8), x_scales[0], global_scales[0], group_size=16)
+        W_deq = dequantize_nvfp4(wqs[0].view(torch.uint8), w_scales[0], global_scales[0], group_size=16)
         X_deq.requires_grad_(True)
         W_deq.requires_grad_(True)
 
@@ -3362,7 +3329,7 @@ class NVFP4BackwardTests(unittest.TestCase):
         W = torch.randn(64, K, dtype=torch.bfloat16, device=self.device) * 0.01
         gs, x_gs, w_gs = get_nvfp4_global_scales_naive([X], [W])
         xqs, x_scales = quantize_nvfp4_naive([X], x_gs)
-        X_deq = _ref_dequantize_nvfp4(xqs[0], x_scales[0], gs[0])
+        X_deq = dequantize_nvfp4(xqs[0].view(torch.uint8), x_scales[0], gs[0], group_size=16)
         self.assertEqual(X_deq.shape, (M, K))
         self.assertEqual(X_deq.dtype, torch.bfloat16)
         self.assertTrue(X_deq.isfinite().all())
