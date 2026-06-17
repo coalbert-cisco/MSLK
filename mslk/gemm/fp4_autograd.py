@@ -22,12 +22,9 @@ BF16-backward pattern used throughout the repo.
 from typing import Optional
 
 import torch
-from mslk.quantize.triton.legacy.fp4_utils import (
-    dequantize_nvfp4,
-    fp4_to_float,
-)
-from mslk.quantize.triton.legacy.primitives import _from_blocked
 
+from mslk.quantize.triton.legacy.fp4_utils import dequantize_nvfp4, fp4_to_float
+from mslk.quantize.triton.legacy.primitives import _from_blocked
 
 # ---------------------------------------------------------------------------
 # Dequantization helpers
@@ -58,19 +55,14 @@ def _dequantize_mxfp4_to_bf16(
 
     # Unswizzle scale from blocked layout to [M, num_groups]
     num_groups = K // block_size
-    scale_flat = _from_blocked(
-        scale.reshape(-1).view(torch.uint8), (M, num_groups)
-    )
+    scale_flat = _from_blocked(scale.reshape(-1).view(torch.uint8), (M, num_groups))
 
     # E8M0 power-of-2 scaling: value = 2^(uint8_val - 127)
-    scale_float = torch.exp2(
-        scale_flat.view(torch.uint8).to(torch.float32) - 127.0
-    )
+    scale_float = torch.exp2(scale_flat.view(torch.uint8).to(torch.float32) - 127.0)
 
     # Apply per-group scale
     x_scaled = (
-        x_float.view(M, num_groups, block_size)
-        * scale_float.view(M, num_groups, 1)
+        x_float.view(M, num_groups, block_size) * scale_float.view(M, num_groups, 1)
     ).view(M, K)
 
     return x_scaled.to(torch.bfloat16)
@@ -148,8 +140,7 @@ def _dequantize_fp4_ultra(
 
     # Apply scale per group
     x_scaled = (
-        x_float.view(M, num_groups, group_size)
-        * true_scale.view(M, num_groups, 1)
+        x_float.view(M, num_groups, group_size) * true_scale.view(M, num_groups, 1)
     ).view(M, K)
 
     return x_scaled.to(torch.bfloat16)
@@ -162,7 +153,7 @@ def _dequantize_fp4_ultra(
 if hasattr(torch.ops.mslk, "f4f4bf16"):
 
     def _f4f4bf16_setup_context(ctx, inputs, output):  # type: ignore[no-untyped-def]
-        (XQ, WQ, x_scale, w_scale, output_buf, global_scale, mxfp4_block_size) = inputs
+        XQ, WQ, x_scale, w_scale, output_buf, global_scale, mxfp4_block_size = inputs
         ctx.save_for_backward(XQ, WQ, x_scale, w_scale)
         ctx.global_scale = global_scale
         ctx.mxfp4_block_size = mxfp4_block_size
@@ -202,7 +193,7 @@ if hasattr(torch.ops.mslk, "f4f4bf16"):
 if hasattr(torch.ops.mslk, "f4f4bf16_grouped_mm"):
 
     def _f4f4bf16_grouped_mm_setup_context(ctx, inputs, output):  # type: ignore[no-untyped-def]
-        (XQ, WQ, x_scale, w_scale, offsets, output_buf, global_scale) = inputs
+        XQ, WQ, x_scale, w_scale, offsets, output_buf, global_scale = inputs
         ctx.save_for_backward(XQ, WQ, x_scale, w_scale, offsets)
         ctx.global_scale = global_scale
 
@@ -228,12 +219,24 @@ if hasattr(torch.ops.mslk, "f4f4bf16_grouped_mm"):
                 xq_g = XQ[start:end]
                 wq_g = WQ[g]
 
-                xs_g = x_scale[g] if x_scale.dim() >= 2 and x_scale.shape[0] == G else x_scale
-                ws_g = w_scale[g] if w_scale.dim() >= 2 and w_scale.shape[0] == G else w_scale
+                xs_g = (
+                    x_scale[g]
+                    if x_scale.dim() >= 2 and x_scale.shape[0] == G
+                    else x_scale
+                )
+                ws_g = (
+                    w_scale[g]
+                    if w_scale.dim() >= 2 and w_scale.shape[0] == G
+                    else w_scale
+                )
 
                 gs_g = None
                 if global_scale is not None:
-                    gs_g = global_scale[g] if global_scale.dim() >= 1 and global_scale.shape[0] == G else global_scale
+                    gs_g = (
+                        global_scale[g]
+                        if global_scale.dim() >= 1 and global_scale.shape[0] == G
+                        else global_scale
+                    )
 
                 X_g = _dequantize_fp4_to_bf16(xq_g, xs_g, gs_g, 32)
                 W_g = _dequantize_fp4_to_bf16(wq_g, ws_g, gs_g, 32)
@@ -243,20 +246,35 @@ if hasattr(torch.ops.mslk, "f4f4bf16_grouped_mm"):
                 grad_X_parts.append(dY_g @ W_g.t())
                 grad_W_parts.append(dY_g.t() @ X_g)
             else:
+                # 2D-2D grouped GEMM: XQ is (M, total_K), WQ is (total_K, N),
+                # offsets index into K dimension, output is (G, M, N).
                 xq_g = XQ[:, start:end] if start < XQ.shape[1] else XQ
                 wq_g = WQ[:, start:end] if start < WQ.shape[1] else WQ
 
-                xs_g = x_scale[g] if x_scale.dim() >= 2 and x_scale.shape[0] == G else x_scale
-                ws_g = w_scale[g] if w_scale.dim() >= 2 and w_scale.shape[0] == G else w_scale
+                xs_g = (
+                    x_scale[g]
+                    if x_scale.dim() >= 2 and x_scale.shape[0] == G
+                    else x_scale
+                )
+                ws_g = (
+                    w_scale[g]
+                    if w_scale.dim() >= 2 and w_scale.shape[0] == G
+                    else w_scale
+                )
 
                 gs_g = None
                 if global_scale is not None:
-                    gs_g = global_scale[g] if global_scale.dim() >= 1 and global_scale.shape[0] == G else global_scale
+                    gs_g = (
+                        global_scale[g]
+                        if global_scale.dim() >= 1 and global_scale.shape[0] == G
+                        else global_scale
+                    )
 
                 X_g = _dequantize_fp4_to_bf16(xq_g, xs_g, gs_g, 32)
                 W_g = _dequantize_fp4_to_bf16(wq_g, ws_g, gs_g, 32)
 
-                dY_g = grad_output
+                # Output is (G, M, N) — index by group to get (M, N) slice.
+                dY_g = grad_output[g]
 
                 grad_X_parts.append(dY_g @ W_g)
                 grad_W_parts.append(dY_g.t() @ X_g)
@@ -285,7 +303,16 @@ if hasattr(torch.ops.mslk, "f4f4bf16_grouped_mm"):
 if hasattr(torch.ops.mslk, "f4f4bf16_ultra_grouped_mm"):
 
     def _f4f4bf16_ultra_setup_context(ctx, inputs, output):  # type: ignore[no-untyped-def]
-        (XQ, WQ, x_scale, w_scale, offsets, x_global_scale, w_global_scale, output_buf) = inputs
+        (
+            XQ,
+            WQ,
+            x_scale,
+            w_scale,
+            offsets,
+            x_global_scale,
+            w_global_scale,
+            output_buf,
+        ) = inputs
         ctx.save_for_backward(XQ, WQ, x_scale, w_scale, offsets)
         ctx.x_global_scale = x_global_scale
         ctx.w_global_scale = w_global_scale
@@ -312,7 +339,9 @@ if hasattr(torch.ops.mslk, "f4f4bf16_ultra_grouped_mm"):
             wq_g = WQ[g] if WQ.dim() == 3 else WQ
 
             xs_g = x_scale[start:end] if x_scale.dim() == 2 else x_scale
-            ws_g = w_scale[g] if w_scale.dim() >= 2 and w_scale.shape[0] == G else w_scale
+            ws_g = (
+                w_scale[g] if w_scale.dim() >= 2 and w_scale.shape[0] == G else w_scale
+            )
 
             if x_global_scale is not None and x_global_scale.numel() > 0:
                 x_gs_g = x_global_scale[start:end]
@@ -328,15 +357,18 @@ if hasattr(torch.ops.mslk, "f4f4bf16_ultra_grouped_mm"):
 
             dY_g = grad_output[start:end]
 
-            if W_g.shape[0] != dY_g.shape[1]:
-                grad_X_parts.append(dY_g @ W_g.t())
-                grad_W_parts.append(dY_g.t() @ X_g)
-            else:
-                grad_X_parts.append(dY_g @ W_g)
-                grad_W_parts.append(dY_g.t() @ X_g)
+            # Forward computes Y_g = X_g @ W_g where W_g is stored as (K, N)
+            # (the caller transposes WQ before passing to the kernel).
+            # Therefore: grad_X = dY @ W_g^T, grad_W = dY^T @ X_g.
+            grad_X_parts.append(dY_g @ W_g.t())
+            grad_W_parts.append(dY_g.t() @ X_g)
 
         grad_X = torch.cat(grad_X_parts, dim=0)
-        grad_W = torch.stack(grad_W_parts, dim=0) if WQ.dim() == 3 else torch.cat(grad_W_parts, dim=0)
+        grad_W = (
+            torch.stack(grad_W_parts, dim=0)
+            if WQ.dim() == 3
+            else torch.cat(grad_W_parts, dim=0)
+        )
 
         # 8 inputs: XQ, WQ, x_scale, w_scale, offsets, x_global_scale, w_global_scale, output
         return (grad_X, grad_W, None, None, None, None, None, None)
